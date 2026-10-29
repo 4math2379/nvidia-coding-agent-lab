@@ -1,0 +1,62 @@
+// Zed settings to merge into your own (Windows: %APPDATA%\Zed\settings.json,
+// Linux/macOS: ~/.config/zed/settings.json). Keep your other keys; add these two blocks.
+// API keys: Agent panel > Settings > provider > API key, or env NVIDIA_API_KEY /
+// NEMOTRON_MODAL_API_KEY. Never put keys in this file. Guide: coder/README.md, section 6.
+{
+  // NVIDIA docs MCP servers (public; nvidia-cuda-docs asks for an NVIDIA Developer login)
+  "context_servers": {
+    "nvidia-cuda-docs": { "url": "https://api.copilot.nsight.ngc.nvidia.com/mcp/cuda-docs" },
+    "nvidia-dynamo-docs": { "url": "https://docs.nvidia.com/dynamo/_mcp/server" },
+    "nvidia-aiperf-docs": { "url": "https://docs.nvidia.com/aiperf/_mcp/server" }
+  },
+  "language_models": {
+    "openai_compatible": {
+      // build.nvidia.com: free tier, no GPU to pay for. Tested 2026-10-27 with tool calls:
+      // Super-VL 0.4 s to first token / 64 tok/s, Lightning 0.2 s / 98 tok/s,
+      // Ultra ~200 s of queue before the first token (free tier).
+      "nvidia": {
+        "api_url": "https://integrate.api.nvidia.com/v1",
+        "available_models": [
+          {
+            "name": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+            "display_name": "Nemotron 3.5 Super-VL (NVIDIA API, free)",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false }
+          },
+          {
+            "name": "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "display_name": "Nemotron 3.5 Lightning (NVIDIA API, free, fast)",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "capabilities": { "tools": true, "images": false, "parallel_tool_calls": false }
+          },
+          {
+            "name": "nvidia/nemotron-3-ultra-550b-a55b",
+            "display_name": "Nemotron 3 Ultra (NVIDIA API, free, slow queue)",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "capabilities": { "tools": true, "images": false, "parallel_tool_calls": false }
+          }
+        ]
+      },
+      // Your Modal endpoint (coder/serve.py): billed per second while a GPU runs.
+      // Replace <workspace> with yours (modal profile current), keep /v1 at the end.
+      "nemotron-modal": {
+        "api_url": "https://<workspace>--nemotron-coder-super-rtx-server.us-west.modal.direct/v1",
+        "available_models": [
+          {
+            "name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+            "display_name": "Nemotron 3 Super (Modal RTX PRO 6000)",
+            "max_tokens": 262144,
+            "max_output_tokens": 16384,
+            "capabilities": { "tools": true, "images": false, "parallel_tool_calls": false }
+          }
+        ]
+      }
+    }
+  },
+  "agent": {
+    "default_model": { "provider": "nvidia", "model": "nvidia/nemotron-3.5-super-vl-120b-a12b" }
+  }
+}

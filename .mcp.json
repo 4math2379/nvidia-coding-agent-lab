@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "nvidia-cuda-docs": {
+      "type": "http",
+      "url": "https://api.copilot.nsight.ngc.nvidia.com/mcp/cuda-docs"
+    },
+    "nvidia-dynamo-docs": {
+      "type": "http",
+      "url": "https://docs.nvidia.com/dynamo/_mcp/server"
+    },
+    "nvidia-aiperf-docs": {
+      "type": "http",
+      "url": "https://docs.nvidia.com/aiperf/_mcp/server"
+    },
+    "nvidia-guardrails-docs": {
+      "type": "http",
+      "url": "https://docs.nvidia.com/nemo/guardrails/_mcp/server"
+    }
+  }
+}
