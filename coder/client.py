@@ -19,6 +19,8 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 
 from openai import APIConnectionError, APIError, APIStatusError, OpenAI
 
@@ -149,12 +151,37 @@ def proxy_headers() -> dict[str, str]:
     return {"Modal-Key": key, "Modal-Secret": secret} if key and secret else {}
 
 
+def http_status(method: str, url: str) -> int:
+    """Status code of a request sent without the API key (standard library only)."""
+    req = urllib.request.Request(url, method=method, headers=proxy_headers(), data=b"" if method == "POST" else None)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def check_key_everywhere(base_url: str):
+    """Without the key, /health must answer and every other route must refuse (coder/auth.py)."""
+    root = base_url.rstrip("/")
+    health = http_status("GET", f"{root}/health")
+    probes = {path: http_status(method, f"{root}{path}")
+              for method, path in (("POST", "/invocations"), ("GET", "/metrics"), ("GET", "/v1/models"))}
+    answered = [path for path, status in probes.items() if status < 400]
+    summary = ", ".join(f"{path} {status}" for path, status in probes.items())
+    if answered:
+        print(f"WARN answered without a key: {', '.join(answered)} ({summary}); deploy coder/auth.py", file=sys.stderr)
+    else:
+        print(f"OK   key required on every route ({summary}), /health {health}", file=sys.stderr)
+
+
 def run_checks(base_url: str, api_key: str, model: str | None, prompt: str, think: bool = False,
                max_tokens: int | None = None):
     client = OpenAI(base_url=base_url.rstrip("/") + "/v1", api_key=api_key, timeout=30 * MINUTES,
                     default_headers=proxy_headers() or None)
     served = wait_for_server(client)
     print(f"OK   server up, model {served}", file=sys.stderr)
+    check_key_everywhere(base_url)
     model = model or served
     with_retries(client, lambda: check_tool_call(client, model))
     progress = {"printed": False}
