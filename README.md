@@ -1,4 +1,17 @@
-# NVIDIA Coding Agent Lab
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="NVIDIA Coding Agent Lab: Nemotron served with vLLM on Modal GPUs, wired into Zed and OpenCode, with NVIDIA docs MCP, an InfiniBand lab and an on-prem target" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://4math2379.github.io/nvidia-coding-agent-lab/"><img alt="Live demo: animated architecture" src="https://img.shields.io/badge/demo-animated%20architecture-0E1310?logo=githubpages&logoColor=white"></a>
+  <a href="https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"><img alt="NVIDIA Nemotron 3" src="https://img.shields.io/badge/NVIDIA-Nemotron%203-76B900?logo=nvidia&logoColor=white"></a>
+  <a href="https://docs.vllm.ai"><img alt="vLLM 0.28" src="https://img.shields.io/badge/vLLM-0.28-30A2FF"></a>
+  <a href="https://modal.com"><img alt="Modal 1.6.2+" src="https://img.shields.io/badge/Modal-%E2%89%A51.6.2-62DE61"></a>
+  <a href="https://www.python.org"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white"></a>
+  <a href="coder/README.md#7-nvidia-mcp-servers-and-skills"><img alt="NVIDIA docs MCP" src="https://img.shields.io/badge/MCP-NVIDIA%20docs-8B5CF6?logo=modelcontextprotocol&logoColor=white"></a>
+  <a href="coder/README.md#6-connecting-the-coding-agent"><img alt="Zed and OpenCode" src="https://img.shields.io/badge/editors-Zed%20%C2%B7%20OpenCode-084CCF"></a>
+  <a href="coder/README.md#4-testing-the-endpoint"><img alt="Smoke test passed on 2026-11-17" src="https://img.shields.io/badge/smoke%20test-passed%202026--11--17-2E9E3E"></a>
+</p>
 
 A hands-on lab for running an **NVIDIA-specialised coding agent**: Nemotron models served
 with vLLM on [Modal](https://modal.com) serverless GPUs, wired into the
