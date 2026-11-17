@@ -16,6 +16,7 @@ rehearses the cluster setup.
 | Path | What it does |
 |---|---|
 | [`coder/serve.py`](coder/serve.py) | OpenAI-compatible vLLM endpoint on Modal. Three tiers: Nemotron 3 Super on 1× RTX PRO 6000 (~$3/h), on 1× B200, or Nemotron 3 Ultra on 4× B200. Scales to zero. |
+| [`coder/auth.py`](coder/auth.py) | vLLM middleware: the bearer key on every route, not only `/v1/*` (used on Modal and on-prem). |
 | [`coder/client.py`](coder/client.py) | Smoke test for any OpenAI-compatible endpoint: health, tool calling, streamed answer, throughput, automatic retry. |
 | [`coder/ib_bench.py`](coder/ib_bench.py) | NCCL all-reduce across 2 × 8 GPUs with RDMA on Modal Clusters, to prove InfiniBand (`NET/IB` + `GDRDMA`) before serving. |
 | [`coder/serve_cluster.py`](coder/serve_cluster.py) | Experimental: Nemotron 3 Ultra BF16 across two 8× H200 nodes (tensor parallel inside a node, pipeline parallel over RDMA). |
@@ -45,9 +46,10 @@ The full deployment guide, with costs, cold-start timings and a troubleshooting 
    pip install -r requirements.txt
    modal setup
    modal secret create huggingface-secret HF_TOKEN=hf_xxx
-   modal secret create nemotron-api-key NEMOTRON_API_KEY=$(openssl rand -hex 32)
+   export NEMOTRON_API_KEY=$(openssl rand -hex 32)   # keep it: Modal cannot show it again
+   modal secret create nemotron-api-key NEMOTRON_API_KEY=$NEMOTRON_API_KEY
    modal deploy coder/serve.py
-   CODER_URL=<printed url> NEMOTRON_API_KEY=<your key> python coder/client.py
+   CODER_URL=<printed url> python coder/client.py
    ```
 
 3. **In your editor.** Merge [`coder/zed/settings.json`](coder/zed/settings.json) into your
@@ -67,8 +69,13 @@ The full deployment guide, with costs, cold-start timings and a troubleshooting 
 
 ## Security model
 
-- vLLM requires a bearer key on `/v1/*`; the key comes from a Modal Secret and never appears
-  on a command line or in logs.
+- A bearer key on **every** route except `/health`: vLLM alone only checks `/v1/*`, so
+  [`coder/auth.py`](coder/auth.py) is loaded as vLLM middleware (Modal and on-prem). The key comes
+  from a Modal Secret and never appears on a command line or in logs.
+- Any request that reaches the Modal URL still starts the GPU before the key is checked:
+  keep the URL private, or deploy with `CODER_PROXY_AUTH=1` so Modal's proxy refuses requests
+  without a proxy token.
+- Model revisions are pinned: `--trust-remote-code` only runs the reviewed commit.
 - No keys in the repo or in editor settings: `.env` is git-ignored and editor keys are entered
   in the UI.
 - One container at most (`max_containers=1`), which also caps the bill.

@@ -27,13 +27,23 @@
         "apiKey": "{env:NVIDIA_API_KEY}"
       },
       "models": {
-        "nvidia/nemotron-3.5-super-vl-120b-a12b": { "name": "Nemotron 3.5 Super-VL (NVIDIA API)" },
-        "nvidia/nemotron-3.5-lightning-30b-a3b": { "name": "Nemotron 3.5 Lightning (NVIDIA API)" },
-        "nvidia/nemotron-3-ultra-550b-a55b": { "name": "Nemotron 3 Ultra (NVIDIA API, slow queue)" }
+        "nvidia/nemotron-3.5-super-vl-120b-a12b": {
+          "name": "Nemotron 3.5 Super-VL (NVIDIA API)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "nvidia/nemotron-3.5-lightning-30b-a3b": {
+          "name": "Nemotron 3.5 Lightning (NVIDIA API)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "nvidia/nemotron-3-ultra-550b-a55b": {
+          "name": "Nemotron 3 Ultra (NVIDIA API, slow queue)",
+          "limit": { "context": 131072, "output": 16384 }
+        }
       }
     }
   },
-  "model": "nemotron/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+  "model": "nvidia-build/nvidia/nemotron-3.5-super-vl-120b-a12b",
+  "small_model": "nvidia-build/nvidia/nemotron-3.5-lightning-30b-a3b",
   "instructions": ["AGENTS.md"],
   "mcp": {
     "nvidia-cuda-docs": {

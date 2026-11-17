@@ -3,11 +3,13 @@
 // API keys: Agent panel > Settings > provider > API key, or env NVIDIA_API_KEY /
 // NEMOTRON_MODAL_API_KEY. Never put keys in this file. Guide: coder/README.md, section 6.
 {
-  // NVIDIA docs MCP servers (public; nvidia-cuda-docs asks for an NVIDIA Developer login)
+  // NVIDIA docs MCP servers (public; nvidia-cuda-docs asks for an NVIDIA Developer login).
+  // If one answers 404, use that product's llms.txt instead (coder/README.md, section 7.1).
   "context_servers": {
     "nvidia-cuda-docs": { "url": "https://api.copilot.nsight.ngc.nvidia.com/mcp/cuda-docs" },
     "nvidia-dynamo-docs": { "url": "https://docs.nvidia.com/dynamo/_mcp/server" },
-    "nvidia-aiperf-docs": { "url": "https://docs.nvidia.com/aiperf/_mcp/server" }
+    "nvidia-aiperf-docs": { "url": "https://docs.nvidia.com/aiperf/_mcp/server" },
+    "nvidia-guardrails-docs": { "url": "https://docs.nvidia.com/nemo/guardrails/_mcp/server" }
   },
   "language_models": {
     "openai_compatible": {
@@ -22,26 +24,36 @@
             "display_name": "Nemotron 3.5 Super-VL (NVIDIA API, free)",
             "max_tokens": 131072,
             "max_output_tokens": 16384,
-            "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false }
+            "capabilities": {
+              "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false,
+              "chat_completions": true, "interleaved_reasoning": false, "max_tokens_parameter": false
+            }
           },
           {
             "name": "nvidia/nemotron-3.5-lightning-30b-a3b",
             "display_name": "Nemotron 3.5 Lightning (NVIDIA API, free, fast)",
             "max_tokens": 131072,
             "max_output_tokens": 16384,
-            "capabilities": { "tools": true, "images": false, "parallel_tool_calls": false }
+            "capabilities": {
+              "tools": true, "images": false, "parallel_tool_calls": false, "prompt_cache_key": false,
+              "chat_completions": true, "interleaved_reasoning": false, "max_tokens_parameter": false
+            }
           },
           {
             "name": "nvidia/nemotron-3-ultra-550b-a55b",
             "display_name": "Nemotron 3 Ultra (NVIDIA API, free, slow queue)",
             "max_tokens": 131072,
             "max_output_tokens": 16384,
-            "capabilities": { "tools": true, "images": false, "parallel_tool_calls": false }
+            "capabilities": {
+              "tools": true, "images": false, "parallel_tool_calls": false, "prompt_cache_key": false,
+              "chat_completions": true, "interleaved_reasoning": false, "max_tokens_parameter": false
+            }
           }
         ]
       },
       // Your Modal endpoint (coder/serve.py): billed per second while a GPU runs.
       // Replace <workspace> with yours (modal profile current), keep /v1 at the end.
+      // Zed sends only the bearer key: deploy without CODER_PROXY_AUTH for Zed.
       "nemotron-modal": {
         "api_url": "https://<workspace>--nemotron-coder-super-rtx-server.us-west.modal.direct/v1",
         "available_models": [
@@ -50,13 +62,20 @@
             "display_name": "Nemotron 3 Super (Modal RTX PRO 6000)",
             "max_tokens": 262144,
             "max_output_tokens": 16384,
-            "capabilities": { "tools": true, "images": false, "parallel_tool_calls": false }
+            "capabilities": {
+              "tools": true, "images": false, "parallel_tool_calls": false, "prompt_cache_key": false,
+              "chat_completions": true, "interleaved_reasoning": false, "max_tokens_parameter": false
+            }
           }
         ]
       }
     }
   },
   "agent": {
-    "default_model": { "provider": "nvidia", "model": "nvidia/nemotron-3.5-super-vl-120b-a12b" }
+    // The free API for the agent, the fast model for short tasks
+    "default_model": { "provider": "nvidia", "model": "nvidia/nemotron-3.5-super-vl-120b-a12b" },
+    "inline_assistant_model": { "provider": "nvidia", "model": "nvidia/nemotron-3.5-lightning-30b-a3b" },
+    "commit_message_model": { "provider": "nvidia", "model": "nvidia/nemotron-3.5-lightning-30b-a3b" },
+    "thread_summary_model": { "provider": "nvidia", "model": "nvidia/nemotron-3.5-lightning-30b-a3b" }
   }
 }

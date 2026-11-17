@@ -10,6 +10,8 @@ stdout carries the answer only; checks, reasoning and stats go to stderr.
 
 Works against any OpenAI-compatible server: Modal, an on-prem vLLM (onprem/docker-compose.yml),
 or build.nvidia.com (CODER_URL=https://integrate.api.nvidia.com, key = NVIDIA_API_KEY).
+Endpoint deployed with CODER_PROXY_AUTH=1: also export MODAL_KEY and MODAL_SECRET (a Modal proxy
+token); they are sent as Modal-Key / Modal-Secret headers.
 """
 
 import argparse
@@ -65,12 +67,18 @@ def check_tool_call(client: OpenAI, model: str):
     calls = r.choices[0].message.tool_calls or []
     if not calls:
         sys.exit(f"FAIL tool calling: no tool call, got {r.choices[0].message.content!r}")
-    args = json.loads(calls[0].function.arguments)
+    try:
+        args = json.loads(calls[0].function.arguments or "{}")
+    except json.JSONDecodeError:
+        sys.exit(f"FAIL tool calling: arguments are not valid JSON: {calls[0].function.arguments!r}")
     print(f"OK   tool calling: {calls[0].function.name}({args})", file=sys.stderr)
 
 
-def stream_answer(client: OpenAI, model: str, prompt: str, think: bool, max_tokens: int | None = None):
-    """Stream the answer to stdout; reasoning and stats go to stderr, so `> file.md` keeps the answer only."""
+def stream_answer(client: OpenAI, model: str, prompt: str, think: bool, max_tokens: int | None = None,
+                  progress: dict | None = None):
+    """Stream the answer to stdout; reasoning and stats go to stderr, so `> file.md` keeps the answer only.
+
+    progress["printed"] becomes True once part of the answer reached stdout."""
     # The reasoning trace counts against max_tokens: leave it room.
     max_tokens = max_tokens or (32768 if think else 16384)
     start = time.time()
@@ -100,6 +108,8 @@ def stream_answer(client: OpenAI, model: str, prompt: str, think: bool, max_toke
             n_chunks += 1
         if choice.delta.content:
             print(choice.delta.content, end="", flush=True)
+            if progress is not None:
+                progress["printed"] = True
     end = time.time()
     print()
     if first:
@@ -109,25 +119,46 @@ def stream_answer(client: OpenAI, model: str, prompt: str, think: bool, max_toke
         print(f"WARN answer cut at max_tokens={max_tokens}: rerun with --max-tokens {max_tokens * 2}", file=sys.stderr)
 
 
-def run_checks(base_url: str, api_key: str, model: str | None, prompt: str, think: bool = False,
-               max_tokens: int | None = None):
-    client = OpenAI(base_url=base_url.rstrip("/") + "/v1", api_key=api_key, timeout=30 * MINUTES)
-    served = wait_for_server(client)
-    print(f"OK   server up, model {served}", file=sys.stderr)
-    model = model or served
-    check_tool_call(client, model)
+def retriable(e: APIError) -> bool:
+    """A dying engine or a cold start is worth a retry; a client error (wrong model, key, size) is not."""
+    if isinstance(e, APIStatusError):
+        return e.status_code >= 500
+    return True  # connection lost, or an error event sent mid-stream by a dying engine
+
+
+def with_retries(client: OpenAI, step, progress: dict | None = None):
+    """Run step(); after a server-side failure wait for a new container and run it again."""
     for attempt in range(1, STREAM_RETRIES + 2):
         try:
-            stream_answer(client, model, prompt, think, max_tokens)
-            return
+            return step()
         except APIError as e:
-            if attempt > STREAM_RETRIES:
+            if attempt > STREAM_RETRIES or not retriable(e):
                 raise
-            print(f"\nserver error mid-answer ({e.message}), retry {attempt}/{STREAM_RETRIES} "
+            print(f"\nserver error ({e.message}), retry {attempt}/{STREAM_RETRIES} "
                   "once a new container is up...", file=sys.stderr)
             time.sleep(15)  # let the dead container leave the pool before polling again
             wait_for_server(client)
-            print("\n\n--- answer restarted ---\n")  # stdout may be a file: mark the cut
+            if progress and progress.get("printed"):
+                print("\n\n--- answer restarted ---\n")  # stdout may be a file: mark the cut
+                progress["printed"] = False
+
+
+def proxy_headers() -> dict[str, str]:
+    """Modal proxy token headers, for an endpoint deployed with CODER_PROXY_AUTH=1."""
+    key, secret = os.environ.get("MODAL_KEY"), os.environ.get("MODAL_SECRET")
+    return {"Modal-Key": key, "Modal-Secret": secret} if key and secret else {}
+
+
+def run_checks(base_url: str, api_key: str, model: str | None, prompt: str, think: bool = False,
+               max_tokens: int | None = None):
+    client = OpenAI(base_url=base_url.rstrip("/") + "/v1", api_key=api_key, timeout=30 * MINUTES,
+                    default_headers=proxy_headers() or None)
+    served = wait_for_server(client)
+    print(f"OK   server up, model {served}", file=sys.stderr)
+    model = model or served
+    with_retries(client, lambda: check_tool_call(client, model))
+    progress = {"printed": False}
+    with_retries(client, lambda: stream_answer(client, model, prompt, think, max_tokens, progress), progress)
 
 
 def main():

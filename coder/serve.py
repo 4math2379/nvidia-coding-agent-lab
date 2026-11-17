@@ -9,19 +9,29 @@ Pick a tier with CODER_TIER (read at deploy time, each tier is its own Modal app
   modal deploy coder/serve.py                          # super-rtx
   CODER_TIER=ultra-b200 modal deploy coder/serve.py    # PowerShell: $env:CODER_TIER="ultra-b200"
   CODER_MTP=1 modal deploy coder/serve.py              # with speculative decoding (see MTP below)
+  CODER_PROXY_AUTH=1 modal deploy coder/serve.py       # Modal proxy auth too (see Security below)
   modal run coder/serve.py                             # temporary copy + smoke test
+  modal run coder/serve.py::download_weights           # optional: fill the weight cache first (CPU only)
 
 Scale to zero: nothing is billed while idle; the first request after a pause pays the cold
 start (weights from the huggingface-cache volume + CUDA graphs, a few minutes).
 
-Secrets (shared with memo.py / omni.py):
+Secrets:
   huggingface-secret  HF_TOKEN=hf_xxx
   nemotron-api-key    NEMOTRON_API_KEY=<random key>
+
+Security: vLLM itself checks the key on /v1/* only, so coder/auth.py is loaded as vLLM
+middleware and requires it on every route except /health. With the default
+unauthenticated=True, Modal's proxy still starts a GPU for any request that reaches the URL,
+key or not; CODER_PROXY_AUTH=1 makes the proxy refuse requests without a Modal proxy token
+(Modal-Key / Modal-Secret headers) before a container starts. Editors that cannot send extra
+headers (Zed) then cannot reach the endpoint; client.py and OpenCode can.
 """
 
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import modal
 
@@ -38,11 +48,17 @@ COMMON_ARGS = [
     "--tool-call-parser", "qwen3_coder",
 ]
 
+# Each tier pins the model revision (Hugging Face commit, checked 2026-11-17): with
+# --trust-remote-code, an unpinned start would run whatever code is on the repo's main branch.
+# startup_minutes covers the first start (download + load + compile, see coder/README.md 3.3);
+# run download_weights first to make every start a load-only start.
 TIERS = {
     "super-rtx": {
         "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+        "revision": "ff433f5493e25d631c9f12b5d55c674229923d02",
         "gpu": "RTX-PRO-6000",
         "target_inputs": 8,
+        "startup_minutes": 40,
         "args": [
             "--tensor-parallel-size", "1",
             "--max-model-len", "262144",
@@ -57,8 +73,10 @@ TIERS = {
     },
     "super-b200": {
         "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+        "revision": "ff433f5493e25d631c9f12b5d55c674229923d02",
         "gpu": "B200",
         "target_inputs": 32,
+        "startup_minutes": 40,
         "args": [
             "--tensor-parallel-size", "1",
             "--max-model-len", "262144",
@@ -72,8 +90,10 @@ TIERS = {
     },
     "ultra-b200": {
         "model": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",  # ~330 GB of weights
+        "revision": "02462641f13d3af838b904f48195b9bb8a1e4ebc",
         "gpu": "B200:4",
         "target_inputs": 16,
+        "startup_minutes": 75,  # first start: 15-40 min download + 5-10 min load, plus warmup
         "args": [
             "--tensor-parallel-size", "4",
             "--enable-expert-parallel",
@@ -97,6 +117,9 @@ if TIER_NAME not in TIERS:
     raise ValueError(f"CODER_TIER={TIER_NAME!r}: choose one of {', '.join(TIERS)}")
 TIER = TIERS[TIER_NAME]
 MODEL_NAME = TIER["model"]
+MODEL_REVISION = TIER["revision"]
+STARTUP_TIMEOUT = TIER["startup_minutes"] * MINUTES
+PROXY_AUTH = os.environ.get("CODER_PROXY_AUTH", "0") == "1"
 
 # MTP speculative decoding (the model drafts 3-5 tokens per step) is off by default: with
 # vLLM 0.28 on RTX PRO 6000 it kills the engine with a GPU memory fault (Xid 31, "unspecified
@@ -119,12 +142,15 @@ vllm_image = (
         {
             "CODER_TIER": TIER_NAME,
             "CODER_MTP": "1" if MTP else "0",
+            "CODER_PROXY_AUTH": "1" if PROXY_AUTH else "0",
             "HF_XET_HIGH_PERFORMANCE": "1",
             "SAFETENSORS_FAST_GPU": "1",
             "NVIDIA_TF32_OVERRIDE": "1",
+            "PYTHONPATH": "/opt/coder",  # vLLM imports auth.BearerEverywhere from here
             **TIER["env"],
         }
     )
+    .add_local_file(Path(__file__).with_name("auth.py"), "/opt/coder/auth.py")
 )
 
 hf_secret = modal.Secret.from_name("huggingface-secret", required_keys=["HF_TOKEN"])
@@ -153,7 +179,7 @@ with vllm_image.imports():
     import requests
 
 
-def wait_ready(process: subprocess.Popen, timeout: int = 40 * MINUTES):
+def wait_ready(process: subprocess.Popen, timeout: int = STARTUP_TIMEOUT - 5 * MINUTES):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if (rc := process.poll()) is not None:
@@ -181,7 +207,7 @@ def warmup():
                 f"http://127.0.0.1:{PORT}/v1/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=5 * MINUTES,
+                timeout=90,  # warmup stays well inside the 5 min left after wait_ready
             ).raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"warmup request failed: {e}")
@@ -192,12 +218,18 @@ def vllm_cmd() -> list[str]:
         "vllm",
         "serve",
         MODEL_NAME,
+        "--revision",
+        MODEL_REVISION,
+        "--tokenizer-revision",
+        MODEL_REVISION,
         "--served-model-name",
         MODEL_NAME,
         "--host",
         "0.0.0.0",
         "--port",
         f"{PORT}",
+        "--middleware",
+        "auth.BearerEverywhere",  # coder/auth.py: the key on every route, not only /v1/*
         *COMMON_ARGS,
         *SERVE_ARGS,
     ]
@@ -212,13 +244,15 @@ def vllm_cmd() -> list[str]:
     scaledown_window=SCALEDOWN_WINDOW,
     max_containers=1,  # caps the bill: one replica is plenty for a personal coding agent
     secrets=[hf_secret, api_key_secret],
-    startup_timeout=40 * MINUTES,  # first start: download (70-330 GB) + torch.compile + CUDA graphs
+    startup_timeout=STARTUP_TIMEOUT,  # first start: download (70-330 GB) + torch.compile + CUDA graphs
     port=PORT,
     routing_region=ROUTING_REGION,
     exit_grace_period=25,
     target_concurrency=TIER["target_inputs"],
-    # Modal's proxy lets requests through; vLLM checks the API key on /v1/*.
-    unauthenticated=True,
+    # Default: the proxy lets every request through (editors can only send the bearer key) and
+    # coder/auth.py checks the key on every route. CODER_PROXY_AUTH=1: the proxy also wants a
+    # Modal proxy token, so requests without one never start a GPU.
+    unauthenticated=not PROXY_AUTH,
 )
 class Server:
     @modal.enter()
@@ -232,6 +266,22 @@ class Server:
     @modal.exit()
     def stop(self):
         self.process.terminate()
+
+
+@app.function(
+    image=vllm_image,
+    volumes={HF_CACHE_PATH: HF_CACHE_VOL},
+    secrets=[hf_secret],
+    timeout=120 * MINUTES,
+)
+def download_weights():
+    """Fill the huggingface-cache volume with the tier's pinned weights on a CPU container, so
+    the GPU never pays for the download: modal run coder/serve.py::download_weights"""
+    from huggingface_hub import snapshot_download
+
+    path = snapshot_download(MODEL_NAME, revision=MODEL_REVISION)
+    HF_CACHE_VOL.commit()
+    print(f"{MODEL_NAME}@{MODEL_REVISION[:7]} cached in {path}")
 
 
 @app.local_entrypoint()

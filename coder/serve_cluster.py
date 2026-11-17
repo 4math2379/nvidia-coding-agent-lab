@@ -8,23 +8,35 @@ EXPERIMENTAL and EXPENSIVE: 16x H200 = ~$73/h while a replica runs. Validate the
 coder/ib_bench.py. For a personal coding agent, coder/serve.py (one GPU, ~$3/h) is the right tool;
 this file is the multi-node / on-prem rehearsal.
 
+  modal run coder/serve_cluster.py::download_weights  # once, CPU only: ~1.1 TB into the volume
   modal deploy coder/serve_cluster.py
   CODER_URL=<printed url> python coder/client.py
   modal app stop nemotron-coder-ultra-cluster        # stop billing
 
 vLLM runs without Ray (multiprocessing backend): rank 0 serves the API, rank 1 runs --headless.
 Only rank 0 receives HTTP traffic on Modal.
+
+The weights are downloaded once, by download_weights, before any GPU starts: both nodes share
+the huggingface-cache volume, and two vLLM processes downloading the same 1.1 TB into it at the
+same time would race (vLLM's download lock only works within one host). The nodes then start
+with HF_HUB_OFFLINE=1 and fail fast if the cache is missing.
+
+Security: as in serve.py, coder/auth.py requires the key on every route (vLLM alone checks /v1/*
+only) and CODER_PROXY_AUTH=1 adds Modal proxy auth, so anonymous hits cannot start 16 GPUs.
 """
 
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import modal
 
 MINUTES = 60  # seconds
 
 MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"
+MODEL_REVISION = "77df655d5e9f8362164ed14dd8b48f8bce657498"  # pinned Hugging Face commit (2026-11-17)
+PROXY_AUTH = os.environ.get("CODER_PROXY_AUTH", "0") == "1"
 N_NODES = 2
 GPUS_PER_NODE = 8
 GPU = f"H200:{GPUS_PER_NODE}"
@@ -42,8 +54,11 @@ image = (
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "NCCL_DEBUG": "INFO",  # look for "via NET/IB/GDRDMA" in the logs
             "NCCL_DEBUG_SUBSYS": "INIT,NET",
+            "CODER_PROXY_AUTH": "1" if PROXY_AUTH else "0",
+            "PYTHONPATH": "/opt/coder",  # vLLM imports auth.BearerEverywhere from here
         }
     )
+    .add_local_file(Path(__file__).with_name("auth.py"), "/opt/coder/auth.py")
 )
 
 hf_secret = modal.Secret.from_name("huggingface-secret", required_keys=["HF_TOKEN"])
@@ -59,7 +74,7 @@ with image.imports():
     import requests
 
 
-def wait_ready(process: subprocess.Popen, timeout: int = 60 * MINUTES):
+def wait_ready(process: subprocess.Popen, timeout: int = 40 * MINUTES):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if (rc := process.poll()) is not None:
@@ -80,11 +95,11 @@ def wait_ready(process: subprocess.Popen, timeout: int = 60 * MINUTES):
     max_containers=N_NODES,  # counts nodes: one 2-node replica at most
     scaledown_window=10 * MINUTES,
     secrets=[hf_secret, api_key_secret],
-    startup_timeout=60 * MINUTES,  # first start downloads ~1.1 TB
+    startup_timeout=45 * MINUTES,  # load only: the weights are already in the volume (download_weights)
     port=PORT,
     exit_grace_period=25,
     target_concurrency=32,
-    unauthenticated=True,  # vLLM checks the API key on /v1/*
+    unauthenticated=not PROXY_AUTH,  # coder/auth.py checks the key on every route
 )
 @modal.clustered(size=N_NODES, rdma=True)
 class Server:
@@ -98,8 +113,11 @@ class Server:
             "vllm",
             "serve",
             MODEL_NAME,
+            "--revision", MODEL_REVISION,
+            "--tokenizer-revision", MODEL_REVISION,
             "--served-model-name",
             MODEL_NAME,
+            "--middleware", "auth.BearerEverywhere",  # coder/auth.py: the key on every route
             "--trust-remote-code",
             "--tensor-parallel-size", f"{GPUS_PER_NODE}",
             "--pipeline-parallel-size", f"{N_NODES}",
@@ -123,7 +141,9 @@ class Server:
         else:
             cmd += ["--headless"]  # contributes GPUs only; rank 0 owns the API server
 
-        env = {**os.environ, "VLLM_API_KEY": os.environ[API_KEY_ENV]}
+        # Offline: the weights come from the volume filled by download_weights, never from the
+        # Hub, so the two nodes cannot race on the same files.
+        env = {**os.environ, "VLLM_API_KEY": os.environ[API_KEY_ENV], "HF_HUB_OFFLINE": "1"}
         self.process = subprocess.Popen(cmd, env=env)
         if rank == 0:
             wait_ready(self.process)
@@ -135,3 +155,14 @@ class Server:
     @modal.exit()
     def stop(self):
         self.process.terminate()
+
+
+@app.function(image=image, volumes={HF_CACHE_PATH: HF_CACHE_VOL}, secrets=[hf_secret], timeout=6 * 60 * MINUTES)
+def download_weights():
+    """Download the pinned BF16 checkpoint (~1.1 TB) once, on a CPU container, before deploying:
+    modal run coder/serve_cluster.py::download_weights"""
+    from huggingface_hub import snapshot_download
+
+    path = snapshot_download(MODEL_NAME, revision=MODEL_REVISION)
+    HF_CACHE_VOL.commit()
+    print(f"{MODEL_NAME}@{MODEL_REVISION[:7]} cached in {path}")

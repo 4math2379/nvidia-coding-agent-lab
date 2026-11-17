@@ -36,11 +36,12 @@ runs on Modal for the lab, then on your own servers.
 | File | Type | How to run it | Role |
 |---|---|---|---|
 | [serve.py](serve.py) | Modal app | `modal deploy coder/serve.py` | vLLM endpoint, 3 tiers (`CODER_TIER`) |
+| [auth.py](auth.py) | vLLM middleware | loaded by `serve.py`, `serve_cluster.py` and the compose file | The API key on every route, not only `/v1/*` |
 | [client.py](client.py) | **local Python script** | `python coder/client.py` (**not** `modal run`) | Test: health, tool call, code answer, throughput |
 | [ib_bench.py](ib_bench.py) | Modal app | `modal run coder/ib_bench.py` | 2-node NCCL all-reduce benchmark over RDMA/InfiniBand |
 | [serve_cluster.py](serve_cluster.py) | Modal app | `modal deploy coder/serve_cluster.py` | Ultra BF16 on 2 nodes × 8 H200 over RDMA (experimental) |
 | [zed/settings.json](zed/settings.json) | Zed config | merged into your Zed settings | Free NVIDIA API + Modal endpoint + NVIDIA MCP (section 6.0) |
-| [opencode.json](opencode.json) + [AGENTS.md](AGENTS.md) | agent config | copied into your project | Modal model + NVIDIA MCP + on-prem specialist prompt |
+| [opencode.json](opencode.json) + [AGENTS.md](AGENTS.md) | agent config | copied into your project | Free NVIDIA API by default, Modal model as an option + NVIDIA MCP + on-prem specialist prompt |
 | [onprem/docker-compose.yml](onprem/docker-compose.yml) | Docker | `docker compose -f ... up -d` | The same server on your machine |
 | [../.mcp.json](../.mcp.json) | Claude Code config | automatic in this repo | NVIDIA MCP for Claude Code |
 
@@ -79,7 +80,7 @@ when the syntax differs.
 ```bash
 cd nvidia-coding-agent-lab          # or the path to your clone
 python3 -m venv venv && source venv/bin/activate
-pip install -U -r requirement.txt   # modal>=1.6.2, openai, requests, aiohttp
+pip install -U -r requirements.txt  # modal>=1.6.2, openai>=1.0
 modal --version                     # must print 1.6.2 or later
 ```
 
@@ -95,7 +96,7 @@ modal profile current  # shows your workspace
 
 ### 2.3 Modal secrets
 
-Two secrets, shared with `memo.py` and `omni.py`. The key names must be exact.
+Two secrets. The key names must be exact.
 
 **Hugging Face token** (to download the weights; create a "read" token at
 huggingface.co/settings/tokens):
@@ -116,7 +117,9 @@ modal secret create nemotron-api-key NEMOTRON_API_KEY=$NEMOTRON_API_KEY
 PowerShell:
 
 ```powershell
-$env:NEMOTRON_API_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+# Cryptographic random bytes (Get-Random is not meant for keys); works in PowerShell 5.1 and 7
+$bytes = [byte[]]::new(32); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:NEMOTRON_API_KEY = -join ($bytes | ForEach-Object { '{0:x2}' -f $_ })
 $env:NEMOTRON_API_KEY
 modal secret create nemotron-api-key NEMOTRON_API_KEY=$env:NEMOTRON_API_KEY
 ```
@@ -125,7 +128,8 @@ Lost the key or need to rotate it: recreate it with `--force`, then redeploy (co
 secret at startup):
 
 ```bash
-modal secret create --force nemotron-api-key NEMOTRON_API_KEY=$(openssl rand -hex 32)
+export NEMOTRON_API_KEY=$(openssl rand -hex 32)   # keep it again: it cannot be read back
+modal secret create --force nemotron-api-key NEMOTRON_API_KEY=$NEMOTRON_API_KEY
 ```
 
 Check: `modal secret list` must show `huggingface-secret` and `nemotron-api-key`.
@@ -194,7 +198,18 @@ The GPU only starts on the first request. The first time:
 | Subsequent starts (weights and compilation cached) | 2 to 4 min | 5 to 10 min |
 
 During this time the URL answers `503 {"error":"no upstreams available"}`: this is normal.
-`startup_timeout` is 40 min. To follow the startup: `modal app logs -f nemotron-coder-super-rtx`.
+`startup_timeout` is 40 min for the Super tiers and 75 min for `ultra-b200` (its first start can
+take up to 50 min). To follow the startup: `modal app logs -f nemotron-coder-super-rtx`.
+
+To keep the download off the GPU bill, fill the cache first on a CPU container (pinned revision,
+same volume):
+
+```bash
+modal run coder/serve.py::download_weights                          # super-rtx / super-b200
+CODER_TIER=ultra-b200 modal run coder/serve.py::download_weights    # ~330 GB
+```
+
+Every start is then a load-only start.
 
 ### 3.4 Useful settings in serve.py
 
@@ -204,7 +219,15 @@ During this time the URL answers `503 {"error":"no upstreams available"}`: this 
 | `SCALEDOWN_WINDOW` | `5 * MINUTES` | How long the GPU stays warm after the last request |
 | `max_containers` | `1` | Caps the bill: a single replica |
 | `CODER_MTP` (deploy-time variable) | `0` | MTP speculative decoding, off by default because it crashes vLLM 0.28 on RTX PRO 6000 (section 10.1). `CODER_MTP=1 modal deploy coder/serve.py` to try it again with a newer vLLM image |
-| `TIERS[...]["args"]` | official recipes | vLLM flags (context, `--max-num-seqs`, MTP...) |
+| `CODER_PROXY_AUTH` (deploy-time variable) | `0` | `1` = Modal's proxy also requires a proxy token (`Modal-Key`/`Modal-Secret` headers), so requests without one never start a GPU. `client.py` reads `MODAL_KEY`/`MODAL_SECRET`; OpenCode can send them with provider `headers`; Zed cannot, so keep `0` for Zed |
+| `TIERS[...]["revision"]` | pinned commits | Hugging Face commit of each checkpoint: `--trust-remote-code` only runs reviewed code. Update it deliberately |
+| `TIERS[...]["args"]` | official recipes | vLLM flags (context, `--max-num-seqs`, MTP...), identical to the [vLLM recipe](https://recipes.vllm.ai/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4) for RTX Pro 6000 |
+
+**Security.** vLLM's own key check covers `/v1/*` only; other routes (`/invocations`, a chat
+route, `/tokenize`, `/metrics`...) answer anyone ([vLLM security](https://docs.vllm.ai/en/latest/usage/security/)).
+`coder/auth.py` is therefore loaded with `--middleware` and requires the key on every route except
+`/health`. With the default `CODER_PROXY_AUTH=0`, any request that reaches the URL still starts the
+GPU before the key is checked, so keep the URL private or use `CODER_PROXY_AUTH=1`.
 
 After any change: `modal deploy coder/serve.py` again (same URL).
 
@@ -290,6 +313,8 @@ curl $CODER_URL/v1/chat/completions \
        "messages":[{"role":"user","content":"Hello"}],
        "max_tokens":64,"chat_template_kwargs":{"enable_thinking":false}}'
 curl -i $CODER_URL/v1/models                                # must answer 401 (no key)
+curl -i -X POST $CODER_URL/invocations                      # 401 too: coder/auth.py covers every route
+curl -i $CODER_URL/metrics                                  # 401
 ```
 
 With reasoning enabled (`"enable_thinking": true`, the model's default), the reasoning arrives
@@ -363,9 +388,10 @@ export CODER_URL=... NEMOTRON_API_KEY=...       # OpenCode reads {env:...} at st
 opencode
 ```
 
-- `opencode.json` declares two providers: `nemotron` (your Modal endpoint) and
-  `nvidia-build` (free API, key `NVIDIA_API_KEY`). To switch models: `/models` in
-  OpenCode.
+- `opencode.json` declares two providers: `nvidia-build` (free API, key `NVIDIA_API_KEY`), the
+  default, with Lightning as `small_model` for titles and summaries; and `nemotron` (your Modal
+  endpoint, needs `CODER_URL` and `NEMOTRON_API_KEY`). To switch models: `/models` in OpenCode.
+  The free API is the default so a session never wakes a billed GPU by accident.
 - For Ultra, select `Nemotron 3 Ultra (Modal)` **and** point `CODER_URL` at the URL of the
   `nemotron-coder-ultra-b200` app.
 - The NVIDIA MCP servers are declared in the `mcp` section; the CUDA MCP asks for an
@@ -407,6 +433,12 @@ Claude Code speaks the Anthropic Messages API, not the OpenAI API: it needs a tr
 | NeMo Guardrails | `https://docs.nvidia.com/nemo/guardrails/_mcp/server` | Guardrails |
 | Brev | `https://docs.nvidia.com/brev/_mcp/server` | NVIDIA GPU cloud (disabled by default in `opencode.json`) |
 | NemoClaw, Infra Controller | `https://docs.nvidia.com/{nemoclaw,infra-controller}/_mcp/server` | As needed |
+
+**Status on 2026-11-17:** the Dynamo, AIPerf and Guardrails servers answered `404` to MCP requests,
+although NVIDIA's own pages (for example the Guardrails
+[use with an AI agent](https://docs.nvidia.com/nemo/guardrails/latest/get-started/use-with-ai-agent)
+page) still list these URLs; Brev answered normally and the CUDA server asks for a sign-in. The
+configs keep the official URLs; until they answer again, use the `llms.txt` route below.
 
 - **Claude Code**: `.mcp.json` at the repo root declares them; Claude Code offers to
   enable them when you open the project. Global install:
@@ -482,6 +514,7 @@ torchrun --nnodes 2 --node_rank <0|1> --nproc_per_node 8 \
 ### 8.2 Serving across several nodes (experimental)
 
 ```bash
+modal run coder/serve_cluster.py::download_weights  # once, CPU only: ~1.1 TB into the volume
 modal deploy coder/serve_cluster.py
 CODER_URL=<printed url> python coder/client.py
 modal app stop nemotron-coder-ultra-cluster        # ~$73/h: do not forget
@@ -490,7 +523,10 @@ modal app stop nemotron-coder-ultra-cluster        # ~$73/h: do not forget
 - Ultra in BF16 (~1.1 TB) split as TP 8 within each node (NVLink) × PP 2 across nodes (RDMA).
 - vLLM without Ray: rank 0 serves the API, rank 1 runs in `--headless` mode; Modal only sends
   HTTP traffic to rank 0.
-- First start: download of ~1.1 TB (up to 60 min).
+- The weights are downloaded once by `download_weights`, before any GPU starts: both nodes share
+  the volume, and two vLLM processes downloading the same files at once would race (vLLM's
+  download lock only works inside one host). The nodes then start offline (`HF_HUB_OFFLINE=1`),
+  and each start is a load-only start (`startup_timeout` 45 min).
 - Untested so far: run it only after 3, 4 and 8.1 are validated. In the logs, look for
   `NET/IB/GDRDMA`.
 
@@ -631,3 +667,9 @@ modal app logs nemotron-coder-super-rtx --since 2h --search "speculative_config"
 - [Dynamo recipe for Nemotron 3 Super](https://docs.nvidia.com/dynamo/latest/recipes/nemotron-3-super)
 - [vLLM multi-node](https://docs.vllm.ai/en/latest/serving/parallelism_scaling.html)
 - [NVIDIA Nsight AI / CUDA MCP](https://developer.nvidia.com/nsight-ai), [NVIDIA skills](https://github.com/NVIDIA/skills)
+- Checked on 2026-11-17: [vLLM recipe for Nemotron 3 Super NVFP4](https://recipes.vllm.ai/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4)
+  (same flags as `serve.py` on RTX Pro 6000, vLLM v0.28.0), [vLLM security](https://docs.vllm.ai/en/latest/usage/security/)
+  (the key covers `/v1/*` only), [`vllm serve` options](https://docs.vllm.ai/en/stable/cli/serve/) (`--middleware`,
+  `--revision`, `--headless`), [vLLM parallelism and scaling](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/),
+  [Modal servers](https://modal.com/docs/guide/servers) and [proxy auth tokens](https://modal.com/docs/guide/webhook-proxy-auth),
+  [CVE-2026-48746](https://nvd.nist.gov/vuln/detail/cve-2026-48746) (vLLM auth bypass, fixed in 0.22.0: the v0.28.0 image used here is not affected)
